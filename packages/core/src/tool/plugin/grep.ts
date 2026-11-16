@@ -101,12 +101,13 @@ export const Plugin = {
               const root = target.absolute
               const type = yield* ToolSearch.pathType(environment.files, root, input.path ?? ".")
               const cwd = type === "directory" ? root : path.dirname(root)
+              const include = input.include ? ToolSearch.resolveGlobPattern(input.include, cwd).pattern : undefined
               const result = yield* ToolSearch.bounded(input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT, (limit) =>
                 ripgrep.grep({
                   cwd,
                   pattern: input.pattern,
                   file: type === "file" ? path.basename(root) : undefined,
-                  include: input.include,
+                  include,
                   literal: input.literal,
                   caseSensitive: input.caseSensitive,
                   limit,

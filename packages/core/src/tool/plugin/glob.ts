@@ -63,7 +63,15 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
+              const base = input.path === "undefined" || input.path === "null" ? undefined : input.path
+              const baseDirectory = base ? path.resolve(location.directory, base) : location.directory
+              const resolved = ToolSearch.resolveGlobPattern(input.pattern, baseDirectory)
+              const searchPath =
+                resolved.path === baseDirectory
+                  ? base
+                  : resolved.path === location.directory
+                    ? undefined
+                    : resolved.path
               const target = yield* access.resolve({ path: searchPath ?? ".", kind: "directory" })
               yield* access.authorizeExternal([target], context)
               yield* permission.assert({
@@ -78,14 +86,14 @@ export const Plugin = {
                 },
                 ...Permission.invocation(context),
               })
-              const type = yield* ToolSearch.pathType(environment.files, target.absolute, searchPath ?? ".")
+              const type = yield* ToolSearch.pathType(environment.files, target.absolute, base ?? searchPath ?? ".")
               if (type !== "directory")
                 return yield* Effect.fail(
-                  new ToolFailure({ message: `Search path is not a directory: ${searchPath ?? "."}` }),
+                  new ToolFailure({ message: `Search path is not a directory: ${base ?? searchPath ?? "."}` }),
                 )
               const root = target.absolute
               const result = yield* ToolSearch.bounded(input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT, (limit) =>
-                ripgrep.glob({ cwd: root, pattern: input.pattern, hidden: input.hidden, limit }),
+                ripgrep.glob({ cwd: root, pattern: resolved.pattern, hidden: input.hidden, limit }),
               )
               return {
                 entries: result.items.map((entry) =>

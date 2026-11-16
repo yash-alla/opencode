@@ -15,6 +15,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { GlobTool } from "@opencode/core/tool/plugin/glob"
 import { GrepTool } from "@opencode/core/tool/plugin/grep"
+import { ToolSearch } from "@opencode/core/tool/search"
 import { Tool } from "@opencode/core/tool"
 import { location } from "./fixture/location"
 import { tmpdir, tmpdirScoped, withTempDir } from "./fixture/tmpdir"
@@ -400,5 +401,159 @@ describe("search tools", () => {
           Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
         ),
     ),
+  )
+
+  it.live("matches files from an absolute glob pattern inside the location", () =>
+    withTempDir((tmp) =>
+      withTools(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const srcDir = path.join(tmp.path, "src")
+          const mainDir = path.join(srcDir, "main")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(mainDir, { recursive: true })
+            await Bun.write(path.join(srcDir, "index.ts"), "export const a = 1\n")
+            await Bun.write(path.join(mainDir, "ARCHITECTURE.md"), "# Architecture\n")
+            await Bun.write(path.join(tmp.path, "root.md"), "# Root\n")
+          })
+
+          const globPattern = (p: string) => executeTool(registry, call("glob", { pattern: p }))
+
+          const recursive = yield* globPattern(path.join(tmp.path, "src", "**", "*.ts"))
+          expect(recursive).toMatchObject({
+            status: "completed",
+            output: [{ path: path.join("src", "index.ts"), type: "file" }],
+          })
+
+          const exact = yield* globPattern(path.join(tmp.path, "src", "main", "ARCHITECTURE.md"))
+          expect(exact).toMatchObject({
+            status: "completed",
+            output: [{ path: path.join("src", "main", "ARCHITECTURE.md"), type: "file" }],
+          })
+
+          const directOnly = yield* globPattern(path.join(tmp.path, "*.md"))
+          expect(directOnly).toMatchObject({
+            status: "completed",
+            output: [{ path: "root.md", type: "file" }],
+          })
+        }),
+      ),
+    ),
+  )
+
+  it.live("matches files from an absolute glob pattern outside the location with external approval", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([active, outside]) => {
+        const assertions: Permission.AssertInput[] = []
+        const outsideDir = path.join(outside.path, "nested")
+        return Effect.promise(async () => {
+          await fs.mkdir(outsideDir, { recursive: true })
+          await fs.writeFile(path.join(outsideDir, "outside.txt"), "outside\n")
+        }).pipe(
+          Effect.andThen(
+            withTools(
+              active.path,
+              (registry) =>
+                executeTool(registry, call("glob", { pattern: path.join(outsideDir, "**", "*.txt") })),
+              assertions,
+            ),
+          ),
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              expect(result.status).toBe("completed")
+              expect(assertions.map((input) => input.action)).toEqual(["external_directory", "glob"])
+              expect(result).toMatchObject({
+                output: [{ path: path.relative(active.path, path.join(outsideDir, "outside.txt")), type: "file" }],
+              })
+            }),
+          ),
+        )
+      },
+      ([active, outside]) =>
+        Effect.promise(() =>
+          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
+        ),
+    ),
+  )
+
+  it.live("matches files using an absolute include glob in grep", () =>
+    withTempDir((tmp) =>
+      withTools(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const srcDir = path.join(tmp.path, "src")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(srcDir, { recursive: true })
+            await Bun.write(path.join(srcDir, "target.ts"), "export const secret = 'needle'\n")
+            await Bun.write(path.join(tmp.path, "other.txt"), "needle in other\n")
+          })
+
+          const result = yield* executeTool(
+            registry,
+            call("grep", { pattern: "needle", include: path.join(tmp.path, "src", "**", "*.ts") }),
+          )
+          expect(result).toMatchObject({
+            status: "completed",
+            output: [
+              {
+                entry: { path: path.join("src", "target.ts"), type: "file" },
+                line: 1,
+              },
+            ],
+          })
+        }),
+      ),
+    ),
+  )
+})
+
+describe("ToolSearch.resolveGlobPattern", () => {
+  it.live("preserves relative and anchored glob patterns", () =>
+    Effect.sync(() => {
+      expect(ToolSearch.resolveGlobPattern("**/*.ts", "/workspace")).toEqual({
+        path: "/workspace",
+        pattern: "**/*.ts",
+      })
+      expect(ToolSearch.resolveGlobPattern("/*.md", "/workspace")).toEqual({
+        path: "/workspace",
+        pattern: "/*.md",
+      })
+      expect(ToolSearch.resolveGlobPattern("/**/*.ts", "/workspace")).toEqual({
+        path: "/workspace",
+        pattern: "/**/*.ts",
+      })
+    }),
+  )
+
+  it.live("resolves absolute patterns inside the base directory", () =>
+    Effect.sync(() => {
+      const base = path.resolve("workspace")
+      expect(ToolSearch.resolveGlobPattern(path.join(base, "src", "**", "*.ts"), base)).toEqual({
+        path: base,
+        pattern: "/src/**/*.ts",
+      })
+      expect(ToolSearch.resolveGlobPattern(path.join(base, "src", "a.ts"), base)).toEqual({
+        path: base,
+        pattern: "/src/a.ts",
+      })
+      expect(ToolSearch.resolveGlobPattern(path.join(base, "*.md"), base)).toEqual({
+        path: base,
+        pattern: "/*.md",
+      })
+    }),
+  )
+
+  it.live("splits absolute patterns outside the base directory at the glob root", () =>
+    Effect.sync(() => {
+      const base = path.resolve("workspace")
+      const outside = path.resolve("outside", "dir")
+      expect(ToolSearch.resolveGlobPattern(path.join(outside, "src", "**", "*.ts"), base)).toEqual({
+        path: path.join(outside, "src"),
+        pattern: "/**/*.ts",
+      })
+      expect(ToolSearch.resolveGlobPattern(path.join(outside, "src", "a.ts"), base)).toEqual({
+        path: path.join(outside, "src"),
+        pattern: "/a.ts",
+      })
+    }),
   )
 })
